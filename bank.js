@@ -257,6 +257,23 @@ app.delete('/delete-account', authenticate, async (req, res) => {
         res.status(500).json({ error: 'Account deletion failed' });
     }
 });
+// View Transactions Route
+app.get('/transactions', authenticate, async (req, res) => {
+    try {
+        // Fetch transactions related to the user
+        const transactions = await Transaction.find({ userId: req.userId });
+
+        if (!transactions || transactions.length === 0) {
+            return res.status(404).json({ error: 'No transactions found' });
+        }
+
+        // Return the user's transactions
+        res.json({ transactions });
+    } catch (error) {
+        console.error('Error fetching transactions:', error);
+        res.status(500).json({ error: 'Error fetching transactions' });
+    }
+});
 
 
   
