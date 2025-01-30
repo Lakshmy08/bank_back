@@ -28,10 +28,17 @@ mongoose.connect(dbURI, {
 const JWT_SECRET = 'mySuperSecretKey123!'; // Change this to your secret key
 
 // User Schema
+// User Schema
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
-    email: { type: String, unique: true, required: true },
-    password: { type: String, required: true },
+    accountType: { type: String, enum: ['savings', 'current'], required: true }, // New field for account type
+    cifNumber: { type: String, unique: true, required: true }, // New field for CIF number
+    branchCode: { type: String, required: true }, // New field for branch code
+    country: { type: String, required: true }, // New field for country
+    email: { type: String, unique: true, required: true }, 
+    mobileNumber: { type: String, required: true }, // New field for mobile number
+    username: { type: String, unique: true, required: true }, // New field for username
+    password: { type: String, required: true }, 
     balance: { type: Number, default: 0 },
     transactions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Transaction' }]
 });
@@ -49,7 +56,7 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 // Signup Route
 app.post('/signup', async (req, res) => {
     try {
-        const { name, email, password } = req.body;
+        const { name, accountType, cifNumber, branchCode, country, email, mobileNumber, username, password } = req.body;
 
         // Check if user already exists
         const existingUser = await User.findOne({ email });
@@ -57,9 +64,21 @@ app.post('/signup', async (req, res) => {
             return res.status(400).json({ error: 'Email already registered' });
         }
 
+        // Check if username already exists
+        const existingUsername = await User.findOne({ username });
+        if (existingUsername) {
+            return res.status(400).json({ error: 'Username already taken' });
+        }
+
+        // Check if CIF number already exists
+        const existingCif = await User.findOne({ cifNumber });
+        if (existingCif) {
+            return res.status(400).json({ error: 'CIF number already registered' });
+        }
+
         // Hash the password and save new user
         const hashedPassword = await bcrypt.hash(password, 10);
-        const user = new User({ name, email, password: hashedPassword });
+        const user = new User({ name, accountType, cifNumber, branchCode, country, email, mobileNumber, username, password: hashedPassword });
         await user.save();
 
         res.status(201).json({ message: 'User registered successfully' });
@@ -69,13 +88,12 @@ app.post('/signup', async (req, res) => {
     }
 });
 
-// Login Route
 app.post('/login', async (req, res) => {
     try {
-        const { email, password } = req.body;
+        const { username, password } = req.body;
 
-        // Check if user exists
-        const user = await User.findOne({ email });
+        // Check if user exists using the username
+        const user = await User.findOne({ username });
         if (!user) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
@@ -89,12 +107,26 @@ app.post('/login', async (req, res) => {
         // Generate JWT token
         const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '1h' });
 
-        res.json({ message: 'Login successful', token });
+        // Return user information along with the token
+        const userInfo = {
+            username: user.username,
+            accountNumber: user.accountNumber, // Assuming the account number field exists in the User schema
+            accountType: user.accountType,     // Assuming the account type field exists in the User schema
+            cifNumber: user.cifNumber,         // Assuming the CIF number field exists in the User schema
+            mobileNumber: user.mobileNumber    // Assuming the mobile number field exists in the User schema
+        };
+
+        res.json({
+            message: 'Login successful',
+            token,
+            user: userInfo
+        });
     } catch (error) {
         console.error('Login error:', error);
         res.status(500).json({ error: 'Login error' });
     }
 });
+
 
 // Middleware for authentication
 const authenticate = (req, res, next) => {
@@ -157,8 +189,8 @@ app.post('/withdraw', authenticate, async (req, res) => {
 
 app.post('/transfer', authenticate, async (req, res) => {
     try {
-        console.log("✅ Received Transfer Request");
-        console.log("👉 Request Body:", req.body);
+        console.log("Received Transfer Request");
+        console.log(" Request Body:", req.body);
 
         const { email: recipientEmail, amount } = req.body;
 
@@ -195,7 +227,7 @@ app.post('/transfer', authenticate, async (req, res) => {
 
         // Record transactions
         await Transaction.create([
-            { userId: sender._id, type: 'transfer', amount: -amount },
+            { userId: sender._id, type: 'transfer', amount: amount },
             { userId: recipient._id, type: 'transfer', amount: amount }
         ]);
 
@@ -257,6 +289,7 @@ app.delete('/delete-account', authenticate, async (req, res) => {
         res.status(500).json({ error: 'Account deletion failed' });
     }
 });
+
 // View Transactions Route
 app.get('/transactions', authenticate, async (req, res) => {
     try {
