@@ -27,21 +27,22 @@ mongoose.connect(dbURI, {
 // JWT Secret (hardcoded)
 const JWT_SECRET = 'mySuperSecretKey123!'; // Change this to your secret key
 
-// User Schema
-// User Schema
+
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
-    accountType: { type: String, enum: ['savings', 'current'], required: true }, // New field for account type
-    cifNumber: { type: String, unique: true, required: true }, // New field for CIF number
-    branchCode: { type: String, required: true }, // New field for branch code
-    country: { type: String, required: true }, // New field for country
+    accountNumber: { type: String, unique: true, required: true }, // ✅ New field for account number
+    accountType: { type: String, enum: ['savings', 'current'], required: true },
+    cifNumber: { type: String, unique: true, required: true },
+    branchCode: { type: String, required: true },
+    country: { type: String, required: true },
     email: { type: String, unique: true, required: true }, 
-    mobileNumber: { type: String, required: true }, // New field for mobile number
-    username: { type: String, unique: true, required: true }, // New field for username
+    mobileNumber: { type: String, required: true },
+    username: { type: String, unique: true, required: true },
     password: { type: String, required: true }, 
     balance: { type: Number, default: 0 },
     transactions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Transaction' }]
 });
+
 const User = mongoose.model('User', userSchema);
 
 // Transaction Schema
@@ -56,37 +57,50 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 // Signup Route
 app.post('/signup', async (req, res) => {
     try {
-        const { name, accountType, cifNumber, branchCode, country, email, mobileNumber, username, password } = req.body;
+        const { name, accountNumber, accountType, cifNumber, branchCode, country, email, mobileNumber, username, password } = req.body;
 
-        // Check if user already exists
+        // Check if the account number already exists
+        const existingAccount = await User.findOne({ accountNumber });
+        if (existingAccount) {
+            return res.status(400).json({ error: 'Account number already in use' });
+        }
+
+        // Check if email, username, or CIF number already exists
         const existingUser = await User.findOne({ email });
-        if (existingUser) {
-            return res.status(400).json({ error: 'Email already registered' });
-        }
+        if (existingUser) return res.status(400).json({ error: 'Email already registered' });
 
-        // Check if username already exists
         const existingUsername = await User.findOne({ username });
-        if (existingUsername) {
-            return res.status(400).json({ error: 'Username already taken' });
-        }
+        if (existingUsername) return res.status(400).json({ error: 'Username already taken' });
 
-        // Check if CIF number already exists
         const existingCif = await User.findOne({ cifNumber });
-        if (existingCif) {
-            return res.status(400).json({ error: 'CIF number already registered' });
-        }
+        if (existingCif) return res.status(400).json({ error: 'CIF number already registered' });
 
-        // Hash the password and save new user
+        // Hash password
         const hashedPassword = await bcrypt.hash(password, 10);
-        const user = new User({ name, accountType, cifNumber, branchCode, country, email, mobileNumber, username, password: hashedPassword });
+
+        // Save new user
+        const user = new User({
+            name, 
+            accountNumber,  // ✅ Store user-provided account number
+            accountType, 
+            cifNumber, 
+            branchCode, 
+            country, 
+            email, 
+            mobileNumber, 
+            username, 
+            password: hashedPassword
+        });
+
         await user.save();
 
-        res.status(201).json({ message: 'User registered successfully' });
+        res.status(201).json({ message: 'User registered successfully', accountNumber });
     } catch (error) {
         console.error('Signup error:', error);
         res.status(500).json({ error: error.message });
     }
 });
+
 
 app.post('/login', async (req, res) => {
     try {
@@ -109,11 +123,12 @@ app.post('/login', async (req, res) => {
 
         // Return user information along with the token
         const userInfo = {
+            name: user.name,
             username: user.username,
-            accountNumber: user.accountNumber, // Assuming the account number field exists in the User schema
-            accountType: user.accountType,     // Assuming the account type field exists in the User schema
-            cifNumber: user.cifNumber,         // Assuming the CIF number field exists in the User schema
-            mobileNumber: user.mobileNumber    // Assuming the mobile number field exists in the User schema
+            accountNumber: user.accountNumber || "N/A", // ✅ Ensure it returns even if missing
+            accountType: user.accountType,
+            cifNumber: user.cifNumber,
+            mobileNumber: user.mobileNumber
         };
 
         res.json({
@@ -161,82 +176,109 @@ app.get('/balance', authenticate, async (req, res) => {
 // Deposit Route
 app.post('/deposit', authenticate, async (req, res) => {
     try {
-        const { amount } = req.body;
+        const { amount, ...extraFields } = req.body;
+
+        // Check if only 'amount' is provided
+        if (!amount || Object.keys(extraFields).length > 0) {
+            return res.status(400).json({ error: 'Only amount is accepted' });
+        }
+
         const user = await User.findById(req.userId);
         user.balance += amount;
         await user.save();
         await Transaction.create({ userId: user._id, type: 'deposit', amount });
+
         res.json({ message: 'Deposit successful', balance: user.balance });
     } catch (error) {
         res.status(500).json({ error: 'Deposit error' });
     }
 });
 
+
 // Withdraw Route
 app.post('/withdraw', authenticate, async (req, res) => {
     try {
-        const { amount } = req.body;
+        const { amount, ...extraFields } = req.body;
+
+        // Check if only 'amount' is provided
+        if (!amount || Object.keys(extraFields).length > 0) {
+            return res.status(400).json({ error: 'Only amount is accepted' });
+        }
+
         const user = await User.findById(req.userId);
         if (user.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
+
         user.balance -= amount;
         await user.save();
         await Transaction.create({ userId: user._id, type: 'withdraw', amount });
+
         res.json({ message: 'Withdrawal successful', balance: user.balance });
     } catch (error) {
         res.status(500).json({ error: 'Withdrawal error' });
     }
 });
 
+
 app.post('/transfer', authenticate, async (req, res) => {
     try {
-        console.log("Received Transfer Request");
-        console.log(" Request Body:", req.body);
+        console.log("🟢 Received Transfer Request");
+        console.log("📩 Request Body:", req.body);
 
-        const { email: recipientEmail, amount } = req.body;
+        const { accountNumber: recipientAccount, amount } = req.body;
 
-        if (!recipientEmail || typeof recipientEmail !== 'string' || !amount || amount <= 0) {
-            console.log("❌ Invalid recipient email or amount");
-            return res.status(400).json({ error: 'Invalid recipient email or amount' });
+        if (!recipientAccount || typeof recipientAccount !== 'string' || !amount || amount <= 0) {
+            console.log("❌ Invalid recipient account number or amount");
+            return res.status(400).json({ error: 'Invalid recipient account number or amount' });
         }
 
-        const formattedEmail = recipientEmail.trim().toLowerCase();
+        const formattedAccount = String(recipientAccount).trim();
 
-        // Find sender
+        console.log("🔍 Fetching sender details...");
         const sender = await User.findById(req.userId);
         if (!sender) {
+            console.log("❌ Sender not found!");
             return res.status(404).json({ error: 'Sender not found' });
         }
 
-        // Find recipient
-        const recipient = await User.findOne({ email: formattedEmail });
+        if (sender.accountNumber === formattedAccount) {
+            console.log("❌ Sender is trying to transfer to their own account.");
+            return res.status(400).json({ error: 'Cannot transfer to your own account' });
+        }
+
+        console.log("🔍 Fetching recipient details...");
+        const recipient = await User.findOne({ accountNumber: formattedAccount });
         if (!recipient) {
+            console.log("❌ Recipient not found!");
             return res.status(404).json({ error: 'Recipient not found' });
         }
 
-        // Check if sender has enough balance
+        console.log("💰 Checking sender balance:", sender.balance);
         if (sender.balance < amount) {
+            console.log("❌ Insufficient funds! Sender balance:", sender.balance, "Transfer amount:", amount);
             return res.status(400).json({ error: 'Insufficient funds' });
         }
 
-        // Update balances
+        console.log("💳 Updating balances...");
         sender.balance -= amount;
         recipient.balance += amount;
 
         await sender.save();
         await recipient.save();
+        console.log(`✅ Balances updated! Sender: ${sender.balance}, Recipient: ${recipient.balance}`);
 
-        // Record transactions
+        console.log("📜 Recording transaction...");
         await Transaction.create([
-            { userId: sender._id, type: 'transfer', amount: amount },
-            { userId: recipient._id, type: 'transfer', amount: amount }
+            { userId: sender._id, type: 'transfer', amount, date: new Date() },
+            { userId: recipient._id, type: 'deposit', amount, date: new Date() } // ✅ Fixed type
         ]);
 
         res.json({ message: 'Transfer successful', senderBalance: sender.balance });
     } catch (error) {
-        console.error("❌ Error during transfer:", error);
+        console.error("❌ Transfer error:", error.message);
         res.status(500).json({ error: "Transfer failed" });
     }
 });
+
 
 // Change Password Route
 app.put('/change-password', authenticate, async (req, res) => {
