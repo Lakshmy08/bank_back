@@ -30,7 +30,7 @@ const JWT_SECRET = 'mySuperSecretKey123!'; // Change this to your secret key
 
 const userSchema = new mongoose.Schema({
     name: { type: String, required: true },
-    accountNumber: { type: String, unique: true, required: true }, // ✅ New field for account number
+    accountNumber: { type: String, unique: true, required: true },
     accountType: { type: String, enum: ['savings', 'current'], required: true },
     cifNumber: { type: String, unique: true, required: true },
     branchCode: { type: String, required: true },
@@ -40,7 +40,8 @@ const userSchema = new mongoose.Schema({
     username: { type: String, unique: true, required: true },
     password: { type: String, required: true }, 
     balance: { type: Number, default: 0 },
-    transactions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Transaction' }]
+    transactions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Transaction' }],
+    role: { type: String, enum: ['admin', 'user'], default: 'user' }  // default role set to 'user'
 });
 
 const User = mongoose.model('User', userSchema);
@@ -54,34 +55,40 @@ const transactionSchema = new mongoose.Schema({
 });
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
-// Signup Route
+// Signup Route (Fixed)
 app.post('/signup', async (req, res) => {
     try {
         const { name, accountNumber, accountType, cifNumber, branchCode, country, email, mobileNumber, username, password } = req.body;
 
-        // Check if the account number already exists
-        const existingAccount = await User.findOne({ accountNumber });
-        if (existingAccount) {
-            return res.status(400).json({ error: 'Account number already in use' });
+        // 🛑 Validate Required Fields
+        if (!name || !accountNumber || !accountType || !cifNumber || !branchCode || !country || !email || !mobileNumber || !username || !password) {
+            return res.status(400).json({ error: 'All fields are required' });
         }
 
-        // Check if email, username, or CIF number already exists
-        const existingUser = await User.findOne({ email });
-        if (existingUser) return res.status(400).json({ error: 'Email already registered' });
+        // 🔍 Check for Duplicates
+        const existingUser = await User.findOne({ 
+            $or: [
+                { accountNumber },
+                { email },
+                { username },
+                { cifNumber }
+            ]
+        });
 
-        const existingUsername = await User.findOne({ username });
-        if (existingUsername) return res.status(400).json({ error: 'Username already taken' });
+        if (existingUser) {
+            return res.status(400).json({ error: 'User with provided details already exists' });
+        }
 
-        const existingCif = await User.findOne({ cifNumber });
-        if (existingCif) return res.status(400).json({ error: 'CIF number already registered' });
-
-        // Hash password
+        // 🔑 Hash Password
         const hashedPassword = await bcrypt.hash(password, 10);
+        if (!hashedPassword) {
+            return res.status(500).json({ error: 'Error hashing password' });
+        }
 
-        // Save new user
+        // ✅ Create New User
         const user = new User({
             name, 
-            accountNumber,  // ✅ Store user-provided account number
+            accountNumber,  
             accountType, 
             cifNumber, 
             branchCode, 
@@ -89,24 +96,26 @@ app.post('/signup', async (req, res) => {
             email, 
             mobileNumber, 
             username, 
-            password: hashedPassword
+            password: hashedPassword // Store hashed password
         });
 
         await user.save();
 
         res.status(201).json({ message: 'User registered successfully', accountNumber });
     } catch (error) {
-        console.error('Signup error:', error);
+        console.error('❌ Signup error:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
 
+
+// Login Route (Fixed)
 app.post('/login', async (req, res) => {
     try {
         const { username, password } = req.body;
 
-        // Check if user exists using the username
+        // Check if user exists
         const user = await User.findOne({ username });
         if (!user) {
             return res.status(401).json({ error: 'Invalid credentials' });
@@ -118,23 +127,20 @@ app.post('/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
-        // Generate JWT token
-        const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '1h' });
-
-        // Return user information along with the token
-        const userInfo = {
-            name: user.name,
-            username: user.username,
-            accountNumber: user.accountNumber || "N/A", // ✅ Ensure it returns even if missing
-            accountType: user.accountType,
-            cifNumber: user.cifNumber,
-            mobileNumber: user.mobileNumber
-        };
+        // ✅ Include `role` in the JWT payload
+        const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
 
         res.json({
             message: 'Login successful',
             token,
-            user: userInfo
+            user: {
+                name: user.name,
+                username: user.username,
+                accountNumber: user.accountNumber,
+                accountType: user.accountType,
+                cifNumber: user.cifNumber,
+                mobileNumber: user.mobileNumber
+            }
         });
     } catch (error) {
         console.error('Login error:', error);
@@ -142,26 +148,42 @@ app.post('/login', async (req, res) => {
     }
 });
 
-
-// Middleware for authentication
+// ✅ Fixed authenticate Middleware
 const authenticate = (req, res, next) => {
     const token = req.header('Authorization');
     if (!token) {
-        console.log(' No token provided');
         return res.status(401).json({ error: 'Access denied' });
     }
 
     try {
-        const decoded = jwt.verify(token.split(' ')[1], JWT_SECRET);  // Use `split(' ')[1]` to get the token part after 'Bearer'
-        console.log(' Token decoded:', decoded);
+        const decoded = jwt.verify(token.split(' ')[1], JWT_SECRET);
         req.userId = decoded.userId;
+        req.userRole = decoded.role;  // ✅ Now correctly extracted
         next();
     } catch (error) {
-        console.error('Invalid token error:', error);
         return res.status(400).json({ error: 'Invalid token' });
     }
 };
 
+
+
+
+const checkAdmin = (req, res, next) => {
+    if (req.userRole !== 'admin') {
+        return res.status(403).json({ error: 'Access denied: Admins only' });
+    }
+    next();
+};
+
+app.get('/admin/users', authenticate, checkAdmin, async (req, res) => {
+    try {
+        const users = await User.find(); // Get all users from the database
+        res.json({ users });
+    } catch (error) {
+        console.error('Error fetching users:', error);
+        res.status(500).json({ error: 'Error fetching users' });
+    }
+});
 
 // View Balance Route
 app.get('/balance', authenticate, async (req, res) => {
