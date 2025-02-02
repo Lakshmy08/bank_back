@@ -39,9 +39,12 @@ const userSchema = new mongoose.Schema({
     mobileNumber: { type: String, required: true },
     username: { type: String, unique: true, required: true },
     password: { type: String, required: true }, 
+    dob: { type: String, required: true },
     balance: { type: Number, default: 0 },
     transactions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Transaction' }],
-    role: { type: String, enum: ['admin', 'user'], default: 'user' }  // default role set to 'user'
+    role: { type: String, enum: ['admin', 'user'], default: 'user' },
+    isActivated: { type: Boolean, default: false },
+    isLocked: { type: Boolean, default: false }
 });
 
 const User = mongoose.model('User', userSchema);
@@ -58,11 +61,20 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 // Signup Route (Fixed)
 app.post('/signup', async (req, res) => {
     try {
-        const { name, accountNumber, accountType, cifNumber, branchCode, country, email, mobileNumber, username, password } = req.body;
+        const { 
+            name, accountNumber, accountType, cifNumber, 
+            branchCode, country, email, mobileNumber, 
+            username, password, dob  // Added dob
+        } = req.body;
 
         // 🛑 Validate Required Fields
-        if (!name || !accountNumber || !accountType || !cifNumber || !branchCode || !country || !email || !mobileNumber || !username || !password) {
+        if (!name || !accountNumber || !accountType || !cifNumber || !branchCode || !country || !email || !mobileNumber || !username || !password || !dob) {
             return res.status(400).json({ error: 'All fields are required' });
+        }
+
+        // 🗓️ Validate DOB Format (Optional)
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dob)) { 
+            return res.status(400).json({ error: 'Invalid DOB format. Use YYYY-MM-DD' });
         }
 
         // 🔍 Check for Duplicates
@@ -96,7 +108,8 @@ app.post('/signup', async (req, res) => {
             email, 
             mobileNumber, 
             username, 
-            password: hashedPassword // Store hashed password
+            password: hashedPassword, // Store hashed password
+            dob // Store Date of Birth
         });
 
         await user.save();
@@ -114,39 +127,35 @@ app.post('/signup', async (req, res) => {
 app.post('/login', async (req, res) => {
     try {
         const { username, password } = req.body;
+        const user = await User.findOne({ username }).select('+password');  // Ensure password is retrieved
 
-        // Check if user exists
-        const user = await User.findOne({ username });
-        if (!user) {
-            return res.status(401).json({ error: 'Invalid credentials' });
-        }
+        if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!user.isActivated) return res.status(403).json({ error: 'Account not activated' });
+        if (user.isLocked) return res.status(403).json({ error: 'Account is locked' });
 
-        // Compare hashed passwords
         const passwordMatch = await bcrypt.compare(password, user.password);
-        if (!passwordMatch) {
-            return res.status(401).json({ error: 'Invalid credentials' });
-        }
+        if (!passwordMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
-        // ✅ Include `role` in the JWT payload
         const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
 
-        res.json({
-            message: 'Login successful',
-            token,
-            user: {
-                name: user.name,
-                username: user.username,
-                accountNumber: user.accountNumber,
-                accountType: user.accountType,
-                cifNumber: user.cifNumber,
-                mobileNumber: user.mobileNumber
-            }
+        res.json({ 
+            message: 'Login successful', 
+            token, 
+            user: { 
+                name: user.name, 
+                username: user.username, 
+                accountNumber: user.accountNumber,  // ✅ Include account number
+                accountType: user.accountType,      // ✅ Include account type
+                balance: user.balance,              // ✅ Include balance
+                mobileNumber: user.mobileNumber     // ✅ Include mobile number
+            } 
         });
     } catch (error) {
-        console.error('Login error:', error);
+        console.error('❌ Login Error:', error);  
         res.status(500).json({ error: 'Login error' });
     }
 });
+
 
 // ✅ Fixed authenticate Middleware
 const authenticate = (req, res, next) => {
@@ -372,8 +381,86 @@ app.get('/transactions', authenticate, async (req, res) => {
     }
 });
 
+app.post('/activate', async (req, res) => {
+    try {
+        const { cifNumber, username, dob } = req.body;
+        const user = await User.findOne({ cifNumber, username, dob });
 
-  
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        if (user.isActivated) return res.status(400).json({ error: 'User already activated' });
+
+        user.isActivated = true;
+        await user.save();
+
+        res.json({ message: 'User activated successfully' });
+    } catch (error) {
+        res.status(500).json({ error: 'Activation failed' });
+    }
+});
+
+// Lock User Route
+app.put('/lock-user/:userId', authenticate, checkAdmin, async (req, res) => {
+    try {
+        const user = await User.findById(req.params.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        user.isLocked = true;
+        await user.save();
+
+        res.json({ message: 'User account locked' });
+    } catch (error) {
+        res.status(500).json({ error: 'Lock user failed' });
+    }
+});
+
+// Unlock User Route
+app.put('/unlock-user/:userId', authenticate, checkAdmin, async (req, res) => {
+    try {
+        const user = await User.findById(req.params.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        user.isLocked = false;
+        await user.save();
+
+        res.json({ message: 'User account unlocked' });
+    } catch (error) {
+        res.status(500).json({ error: 'Unlock user failed' });
+    }
+});
+
+app.post('/forgot-password', async (req, res) => {
+    try {
+        const { accountNumber, username, mobileNumber, cifNumber } = req.body;
+
+        // 🔍 Validate Input
+        if (!accountNumber || !username || !mobileNumber || !cifNumber) {
+            return res.status(400).json({ error: 'All fields are required' });
+        }
+
+        // 🔍 Find User by Provided Details
+        const user = await User.findOne({ accountNumber, username, mobileNumber, cifNumber });
+
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // 🔑 Generate a Temporary Password (or OTP)
+        const tempPassword = Math.random().toString(36).slice(-8); // Example: "a1b2c3d4"
+        const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+        // 📝 Update User Password (or send OTP)
+        user.password = hashedPassword;
+        await user.save();
+
+        // ✅ Response (In Production, Send via Email/SMS Instead)
+        res.json({ message: 'Temporary password generated. Please change it immediately.', tempPassword });
+
+    } catch (error) {
+        console.error('Forgot Password Error:', error);
+        res.status(500).json({ error: 'Forgot password request failed' });
+    }
+});
+
 // Start server
-const PORT = 5003;
+const PORT = 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
