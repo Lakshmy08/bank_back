@@ -3,6 +3,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const moment = require('moment-timezone');
 const cors = require('cors');
 
 // Initialize Express app
@@ -58,49 +59,27 @@ const transactionSchema = new mongoose.Schema({
 });
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
-// Signup Route (Fixed)
 app.post('/signup', async (req, res) => {
     try {
+        console.log('Received data:', JSON.stringify(req.body, null, 2)); // Debugging log
+
         const { 
             name, accountNumber, accountType, cifNumber, 
             branchCode, country, email, mobileNumber, 
-            username, password, dob  // Added dob
+            username, password, dob  
         } = req.body;
 
-        // 🛑 Validate Required Fields
-        if (!name || !accountNumber || !accountType || !cifNumber || !branchCode || !country || !email || !mobileNumber || !username || !password || !dob) {
+        // Improved validation logic
+        if ([name, accountNumber, accountType, cifNumber, branchCode, country, email, mobileNumber, username, password, dob]
+            .some(value => value === undefined || value === null || (typeof value === 'string' && value.trim() === ""))) {
             return res.status(400).json({ error: 'All fields are required' });
         }
 
-        // 🗓️ Validate DOB Format (Optional)
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(dob)) { 
-            return res.status(400).json({ error: 'Invalid DOB format. Use YYYY-MM-DD' });
-        }
-
-        // 🔍 Check for Duplicates
-        const existingUser = await User.findOne({ 
-            $or: [
-                { accountNumber },
-                { email },
-                { username },
-                { cifNumber }
-            ]
-        });
-
-        if (existingUser) {
-            return res.status(400).json({ error: 'User with provided details already exists' });
-        }
-
-        // 🔑 Hash Password
         const hashedPassword = await bcrypt.hash(password, 10);
-        if (!hashedPassword) {
-            return res.status(500).json({ error: 'Error hashing password' });
-        }
 
-        // ✅ Create New User
-        const user = new User({
+        const user = new User({ 
             name, 
-            accountNumber,  
+            accountNumber, 
             accountType, 
             cifNumber, 
             branchCode, 
@@ -108,18 +87,18 @@ app.post('/signup', async (req, res) => {
             email, 
             mobileNumber, 
             username, 
-            password: hashedPassword, // Store hashed password
-            dob // Store Date of Birth
+            password: hashedPassword, 
+            dob 
         });
 
         await user.save();
-
-        res.status(201).json({ message: 'User registered successfully', accountNumber });
+        res.status(201).json({ message: 'User registered successfully' });
     } catch (error) {
-        console.error('❌ Signup error:', error);
+        console.error('Signup error:', error);
         res.status(500).json({ error: error.message });
     }
 });
+
 
 
 
@@ -136,7 +115,8 @@ app.post('/login', async (req, res) => {
         const passwordMatch = await bcrypt.compare(password, user.password);
         if (!passwordMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
-        const token = jwt.sign({ userId: user._id, role: user.role }, JWT_SECRET, { expiresIn: '1h' });
+        const token = jwt.sign({ id: user._id.toString() }, JWT_SECRET, { expiresIn: "1h" });
+
 
         res.json({ 
             message: 'Login successful', 
@@ -157,36 +137,52 @@ app.post('/login', async (req, res) => {
 });
 
 
-// ✅ Fixed authenticate Middleware
 const authenticate = (req, res, next) => {
-    const token = req.header('Authorization');
-    if (!token) {
-        return res.status(401).json({ error: 'Access denied' });
+    const authHeader = req.header("Authorization");
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "Access denied. No token provided." });
     }
 
+    const token = authHeader.split(" ")[1];
+
     try {
-        const decoded = jwt.verify(token.split(' ')[1], JWT_SECRET);
-        req.userId = decoded.userId;
-        req.userRole = decoded.role;  // ✅ Now correctly extracted
+        // Decode token using JWT_SECRET
+        const decoded = jwt.verify(token, JWT_SECRET);
+
+        // Ensure decoded token has id field
+        if (!decoded || !decoded.id) {
+            return res.status(401).json({ error: "Invalid token: Missing user data." });
+        }
+
+        // Attach user ID to the request object
+        req.user = { id: decoded.id };
+
+        console.log("✅ Authenticated User ID:", req.user.id);
+
         next();
     } catch (error) {
-        return res.status(400).json({ error: 'Invalid token' });
+        console.error("❌ Invalid token:", error.message);
+        return res.status(403).json({ error: "Invalid token" });
     }
 };
 
 
 
+module.exports = authenticate;
 
+
+// Middleware to check if the user is an admin
 const checkAdmin = (req, res, next) => {
     if (req.userRole !== 'admin') {
-        return res.status(403).json({ error: 'Access denied: Admins only' });
+        return res.status(403).json({ error: 'Access denied. Admins only.' });
     }
     next();
 };
 
 app.get('/admin/users', authenticate, checkAdmin, async (req, res) => {
     try {
-        const users = await User.find(); // Get all users from the database
+        const users = await User.find({}, 'username role email _id'); // Include role
         res.json({ users });
     } catch (error) {
         console.error('Error fetching users:', error);
@@ -194,98 +190,188 @@ app.get('/admin/users', authenticate, checkAdmin, async (req, res) => {
     }
 });
 
-// View Balance Route
 app.get('/balance', authenticate, async (req, res) => {
     try {
-        const user = await User.findById(req.userId);
-        res.json({ balance: user.balance });
+        console.log("Decoded User from Token:", req.user); // Debugging
+
+        if (!req.user || !req.user.id) {
+            return res.status(401).json({ error: "Unauthorized: Invalid user data in token" });
+        }
+
+        const user = await User.findById(req.user.id); // Use req.user.id instead of req.userId
+
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        res.json({
+            name: user.name,
+            accountHolderName: user.name,
+            accountNumber: user.accountNumber,
+            accountType: user.accountType,
+            cifNumber: user.cifNumber,
+            branchCode: user.branchCode,
+            country: user.country,
+            mobileNumber: user.mobileNumber,
+            balance: user.balance
+        });
+
     } catch (error) {
-        res.status(500).json({ error: 'Error fetching balance' });
+        console.error("Error fetching balance:", error);
+        res.status(500).json({ error: "Internal Server Error" });
     }
 });
 
-// Deposit Route
+
 app.post('/deposit', authenticate, async (req, res) => {
     try {
         const { amount, ...extraFields } = req.body;
 
-        // Check if only 'amount' is provided
-        if (!amount || Object.keys(extraFields).length > 0) {
-            return res.status(400).json({ error: 'Only amount is accepted' });
+        if (!amount || isNaN(amount) || amount <= 0 || Object.keys(extraFields).length > 0) {
+            return res.status(400).json({ error: 'Only a valid amount is accepted' });
         }
 
-        const user = await User.findById(req.userId);
+        console.log("🔍 User ID from req:", req.user.id); // Debugging
+
+        if (!req.user.id || !mongoose.Types.ObjectId.isValid(req.user.id)) {
+            return res.status(400).json({ error: "Invalid or missing user ID" });
+        }
+
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ error: "User not found" });
+
         user.balance += amount;
         await user.save();
-        await Transaction.create({ userId: user._id, type: 'deposit', amount });
+
+        const istTime = moment().tz("Asia/Kolkata").format();
+        await Transaction.create({ userId: user._id, type: 'deposit', amount, date: istTime });
 
         res.json({ message: 'Deposit successful', balance: user.balance });
+
     } catch (error) {
+        console.error("❌ Deposit error:", error.message);
         res.status(500).json({ error: 'Deposit error' });
     }
 });
 
 
-// Withdraw Route
 app.post('/withdraw', authenticate, async (req, res) => {
     try {
         const { amount, ...extraFields } = req.body;
 
-        // Check if only 'amount' is provided
-        if (!amount || Object.keys(extraFields).length > 0) {
-            return res.status(400).json({ error: 'Only amount is accepted' });
+        // ✅ Validate Amount & Extra Fields
+        if (!amount || isNaN(amount) || amount <= 0 || Object.keys(extraFields).length > 0) {
+            return res.status(400).json({ error: 'Only a valid amount is accepted' });
         }
 
-        const user = await User.findById(req.userId);
-        if (user.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
+        console.log("🔍 Received withdrawal request. User ID:", req.user.id);
 
-        user.balance -= amount;
-        await user.save();
-        await Transaction.create({ userId: user._id, type: 'withdraw', amount });
+        // ✅ Check if req.user.id exists
+        if (!req.user.id || !mongoose.Types.ObjectId.isValid(req.user.id)) {
+            console.log("❌ Invalid or missing user ID:", req.user.id);
+            return res.status(400).json({ error: "Invalid or missing user ID" });
+        }
 
-        res.json({ message: 'Withdrawal successful', balance: user.balance });
+        const user = await User.findById(req.user.id);
+        if (!user) {
+            console.log("❌ User not found in DB.");
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        if (user.balance < amount) {
+            console.log("❌ Insufficient funds. Balance:", user.balance, "Requested:", amount);
+            return res.status(400).json({ error: 'Insufficient funds' });
+        }
+
+        // ✅ Start a transaction session
+        const session = await mongoose.startSession();
+        session.startTransaction();
+
+        try {
+            // ✅ Update Balance & Store Transaction
+            user.balance -= amount;
+            await user.save({ session });
+
+            const istTime = moment().tz("Asia/Kolkata").format();
+            await Transaction.create([{ userId: user._id, type: 'withdraw', amount, date: istTime }], { session });
+
+            // ✅ Commit transaction
+            await session.commitTransaction();
+            session.endSession();
+
+            console.log("✅ Withdrawal successful. New Balance:", user.balance);
+            res.json({ message: 'Withdrawal successful', balance: user.balance });
+
+        } catch (error) {
+            console.error("❌ Withdrawal transaction error:", error.message);
+            await session.abortTransaction();
+            session.endSession();
+            res.status(500).json({ error: 'Withdrawal error' });
+        }
+
     } catch (error) {
+        console.error("❌ Withdrawal error:", error.message);
         res.status(500).json({ error: 'Withdrawal error' });
     }
 });
 
 
 app.post('/transfer', authenticate, async (req, res) => {
-    try {
-        console.log("🟢 Received Transfer Request");
-        console.log("📩 Request Body:", req.body);
+    const session = await mongoose.startSession(); // ✅ Start a session
+    session.startTransaction();
 
+    try {
+        console.log("🟢 Received Transfer Request:", req.body);
         const { accountNumber: recipientAccount, amount } = req.body;
 
-        if (!recipientAccount || typeof recipientAccount !== 'string' || !amount || amount <= 0) {
+        // ✅ Validate Input
+        if (!recipientAccount || typeof recipientAccount !== 'string' || isNaN(amount) || amount <= 0) {
             console.log("❌ Invalid recipient account number or amount");
+            await session.abortTransaction();
+            session.endSession();
             return res.status(400).json({ error: 'Invalid recipient account number or amount' });
+        }
+
+        // ✅ Ensure User ID is Valid
+        if (!req.user.id || !mongoose.Types.ObjectId.isValid(req.user.id)) {
+            console.log("❌ Invalid or missing sender user ID:", req.user.id);
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ error: "Invalid or missing user ID" });
         }
 
         const formattedAccount = String(recipientAccount).trim();
 
         console.log("🔍 Fetching sender details...");
-        const sender = await User.findById(req.userId);
+        const sender = await User.findById(req.user.id).session(session);
         if (!sender) {
             console.log("❌ Sender not found!");
+            await session.abortTransaction();
+            session.endSession();
             return res.status(404).json({ error: 'Sender not found' });
         }
 
         if (sender.accountNumber === formattedAccount) {
             console.log("❌ Sender is trying to transfer to their own account.");
+            await session.abortTransaction();
+            session.endSession();
             return res.status(400).json({ error: 'Cannot transfer to your own account' });
         }
 
         console.log("🔍 Fetching recipient details...");
-        const recipient = await User.findOne({ accountNumber: formattedAccount });
+        const recipient = await User.findOne({ accountNumber: formattedAccount }).session(session);
         if (!recipient) {
             console.log("❌ Recipient not found!");
+            await session.abortTransaction();
+            session.endSession();
             return res.status(404).json({ error: 'Recipient not found' });
         }
 
         console.log("💰 Checking sender balance:", sender.balance);
         if (sender.balance < amount) {
             console.log("❌ Insufficient funds! Sender balance:", sender.balance, "Transfer amount:", amount);
+            await session.abortTransaction();
+            session.endSession();
             return res.status(400).json({ error: 'Insufficient funds' });
         }
 
@@ -293,24 +379,31 @@ app.post('/transfer', authenticate, async (req, res) => {
         sender.balance -= amount;
         recipient.balance += amount;
 
-        await sender.save();
-        await recipient.save();
+        await sender.save({ session });
+        await recipient.save({ session });
+
         console.log(`✅ Balances updated! Sender: ${sender.balance}, Recipient: ${recipient.balance}`);
 
-        console.log("📜 Recording transaction...");
+        // ✅ Store Transaction with IST Timestamp
+        const istTime = moment().tz("Asia/Kolkata").format();
         await Transaction.create([
-            { userId: sender._id, type: 'transfer', amount, date: new Date() },
-            { userId: recipient._id, type: 'deposit', amount, date: new Date() } // ✅ Fixed type
-        ]);
+            { userId: sender._id, type: 'transfer', amount, date: istTime },
+            { userId: recipient._id, type: 'deposit', amount, date: istTime }
+        ], { session });
 
+        await session.commitTransaction(); // ✅ Commit transaction
+        session.endSession();
+
+        console.log("✅ Transfer successful.");
         res.json({ message: 'Transfer successful', senderBalance: sender.balance });
+
     } catch (error) {
         console.error("❌ Transfer error:", error.message);
+        await session.abortTransaction();
+        session.endSession();
         res.status(500).json({ error: "Transfer failed" });
     }
 });
-
-
 // Change Password Route
 app.put('/change-password', authenticate, async (req, res) => {
     try {
@@ -321,8 +414,13 @@ app.put('/change-password', authenticate, async (req, res) => {
             return res.status(400).json({ error: 'Old and new passwords are required' });
         }
 
+        // Enforce password security policy
+        if (newPassword.length < 8) {
+            return res.status(400).json({ error: 'New password must be at least 8 characters long' });
+        }
+
         // Find user
-        const user = await User.findById(req.userId);
+        const user = await User.findById(req.user.id); // Changed from req.userId to req.user.id
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
@@ -337,25 +435,34 @@ app.put('/change-password', authenticate, async (req, res) => {
         user.password = await bcrypt.hash(newPassword, 10);
         await user.save();
 
-        res.json({ message: 'Password updated successfully' });
+        // ⚠️ Invalidate old tokens (if you implement a token blacklist or refresh token system)
+        // await TokenBlacklist.create({ token: oldToken });
+
+        res.json({ message: 'Password updated successfully. Please log in again.' });
+
     } catch (error) {
-        console.error('Password change error:', error);
+        console.error('❌ Password change error:', error);
         res.status(500).json({ error: 'Password update failed' });
     }
 });
 
-// Delete User Route
+
+// Delete Account Route
 app.delete('/delete-account', authenticate, async (req, res) => {
     try {
-        // Find and delete the user
-        const user = await User.findByIdAndDelete(req.userId);
+        // Ensure the logged-in user is trying to delete their own account (this should already be ensured by the authenticate middleware)
+        const user = await User.findById(req.user.id); // Changed from req.userId to req.user.id
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        // Delete user's transactions
-        await Transaction.deleteMany({ userId: req.userId });
+        // Delete the user's account
+        await User.findByIdAndDelete(req.user.id); // Changed from req.userId to req.user.id
 
+        // Delete any transactions related to the user
+        await Transaction.deleteMany({ userId: req.user.id }); // Changed from req.userId to req.user.id
+
+        // Respond with success
         res.json({ message: 'Account deleted successfully' });
     } catch (error) {
         console.error('Account deletion error:', error);
@@ -363,11 +470,12 @@ app.delete('/delete-account', authenticate, async (req, res) => {
     }
 });
 
+
 // View Transactions Route
 app.get('/transactions', authenticate, async (req, res) => {
     try {
         // Fetch transactions related to the user
-        const transactions = await Transaction.find({ userId: req.userId });
+        const transactions = await Transaction.find({ userId: req.user.id }); // Changed from req.userId to req.user.id
 
         if (!transactions || transactions.length === 0) {
             return res.status(404).json({ error: 'No transactions found' });
@@ -380,6 +488,7 @@ app.get('/transactions', authenticate, async (req, res) => {
         res.status(500).json({ error: 'Error fetching transactions' });
     }
 });
+
 
 app.post('/activate', async (req, res) => {
     try {
@@ -398,33 +507,101 @@ app.post('/activate', async (req, res) => {
     }
 });
 
-// Lock User Route
-app.put('/lock-user/:userId', authenticate, checkAdmin, async (req, res) => {
+app.put('/lock-user', async (req, res) => {
+    const { adminUsername, adminPassword, accountNumber } = req.body;
+
+    if (!adminUsername || !adminPassword || !accountNumber) {
+        return res.status(400).json({ error: 'Admin credentials and target account number are required.' });
+    }
+
     try {
-        const user = await User.findById(req.params.userId);
-        if (!user) return res.status(404).json({ error: 'User not found' });
+        // Fetch the admin user from the database
+        const adminUser = await mongoose.connection.db.collection('users').findOne({ username: adminUsername });
 
-        user.isLocked = true;
-        await user.save();
+        if (!adminUser) {
+            return res.status(404).json({ error: 'Admin user not found.' });
+        }
 
-        res.json({ message: 'User account locked' });
+        const isAdminPasswordValid = await bcrypt.compare(adminPassword, adminUser.password);
+        if (!isAdminPasswordValid) {
+            return res.status(400).json({ error: 'Invalid admin password.' });
+        }
+
+        // Ensure the user has an admin role
+        if (adminUser.role !== 'admin') {
+            return res.status(403).json({ error: 'Permission denied. Only admins can lock user accounts.' });
+        }
+
+        // Fetch the target user by account number
+        const targetUser = await mongoose.connection.db.collection('users').findOne({ accountNumber });
+
+        if (!targetUser) {
+            return res.status(404).json({ error: 'Target user not found.' });
+        }
+
+        if (targetUser.isLocked) {
+            return res.status(400).json({ error: 'User account is already locked.' });
+        }
+
+        // Lock the target user account
+        await mongoose.connection.db.collection('users').updateOne(
+            { accountNumber },
+            { $set: { isLocked: true } }
+        );
+
+        res.json({ message: `User account with account number ${accountNumber} has been locked by admin ${adminUsername}.` });
+
     } catch (error) {
-        res.status(500).json({ error: 'Lock user failed' });
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// Unlock User Route
-app.put('/unlock-user/:userId', authenticate, checkAdmin, async (req, res) => {
+app.put('/unlock-user', async (req, res) => {
+    const { adminUsername, adminPassword, accountNumber } = req.body;
+
+    if (!adminUsername || !adminPassword || !accountNumber) {
+        return res.status(400).json({ error: 'Admin credentials and target account number are required.' });
+    }
+
     try {
-        const user = await User.findById(req.params.userId);
-        if (!user) return res.status(404).json({ error: 'User not found' });
+        // Fetch the admin user from the database
+        const adminUser = await mongoose.connection.db.collection('users').findOne({ username: adminUsername });
 
-        user.isLocked = false;
-        await user.save();
+        if (!adminUser) {
+            return res.status(404).json({ error: 'Admin user not found.' });
+        }
 
-        res.json({ message: 'User account unlocked' });
+        const isAdminPasswordValid = await bcrypt.compare(adminPassword, adminUser.password);
+        if (!isAdminPasswordValid) {
+            return res.status(400).json({ error: 'Invalid admin password.' });
+        }
+
+        // Ensure the user has an admin role
+        if (adminUser.role !== 'admin') {
+            return res.status(403).json({ error: 'Permission denied. Only admins can unlock user accounts.' });
+        }
+
+        // Fetch the target user by account number
+        const targetUser = await mongoose.connection.db.collection('users').findOne({ accountNumber });
+
+        if (!targetUser) {
+            return res.status(404).json({ error: 'Target user not found.' });
+        }
+
+        if (!targetUser.isLocked) {
+            return res.status(400).json({ error: 'User account is not locked.' });
+        }
+
+        // Unlock the target user account
+        await mongoose.connection.db.collection('users').updateOne(
+            { accountNumber },
+            { $set: { isLocked: false } }
+        );
+
+        res.json({ message: `User account with account number ${accountNumber} has been unlocked by admin ${adminUsername}.` });
+
     } catch (error) {
-        res.status(500).json({ error: 'Unlock user failed' });
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
